@@ -22,9 +22,19 @@ export function createDb(file = ":memory:") {
       user_id   INTEGER NOT NULL REFERENCES users(id),
       title     TEXT NOT NULL,
       body      TEXT NOT NULL DEFAULT '',
+      archived  INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Migration for a notes.db created before `archived` existed. SQLite has no
+  // "ADD COLUMN IF NOT EXISTS", so check the table shape first.
+  const hasArchived = db
+    .prepare("SELECT COUNT(*) AS n FROM pragma_table_info('notes') WHERE name = 'archived'")
+    .get().n > 0;
+  if (!hasArchived) {
+    db.exec("ALTER TABLE notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0");
+  }
 
   const seeded = db.prepare("SELECT COUNT(*) AS n FROM users").get().n > 0;
   if (!seeded) {

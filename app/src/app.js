@@ -28,12 +28,48 @@ export function createApp(db) {
 
   app.use("/api", currentUser);
 
-  // List the caller's own notes.
+  // List the caller's own notes. `filter` selects the slice the UI shows;
+  // it is whitelisted here rather than interpolated into SQL.
   app.get("/api/notes", (req, res) => {
+    const filter = req.query.filter ?? "active";
+    const where = { active: "AND archived = 0", archived: "AND archived = 1", all: "" }[filter];
+    if (where === undefined) return res.status(400).json({ error: "unknown filter" });
+
     const rows = db
-      .prepare("SELECT id, title, body, created_at FROM notes WHERE user_id = ? ORDER BY id")
-      .all(req.userId);
+      .prepare(
+        `SELECT id, title, body, archived, created_at
+           FROM notes
+          WHERE user_id = ? ${where}
+          ORDER BY id`,
+      )
+      .all(req.userId)
+      .map((row) => ({ ...row, archived: Boolean(row.archived) }));
     res.json(rows);
+  });
+
+  // Toggle the archived flag on one of the caller's own notes.
+  app.patch("/api/notes/:id/archive", (req, res) => {
+    // The client is user-controlled, so the value is validated here even
+    // though the UI only ever sends a real boolean.
+    const archived = req.body?.archived;
+    if (typeof archived !== "boolean") {
+      return res.status(400).json({ error: "archived must be a boolean" });
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(404).json({ error: "not found" });
+
+    // Scoped to the caller: someone else's note is "not found", never a 403
+    // that would confirm it exists.
+    const info = db
+      .prepare("UPDATE notes SET archived = ? WHERE id = ? AND user_id = ?")
+      .run(archived ? 1 : 0, id, req.userId);
+    if (info.changes === 0) return res.status(404).json({ error: "not found" });
+
+    const note = db
+      .prepare("SELECT id, title, body, archived, created_at FROM notes WHERE id = ?")
+      .get(id);
+    res.json({ ...note, archived: Boolean(note.archived) });
   });
 
   // Read one note.

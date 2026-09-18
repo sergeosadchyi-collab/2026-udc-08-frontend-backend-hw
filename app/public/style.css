@@ -8,8 +8,30 @@ h1 { font-size: 1.4rem; margin: 0; }
 form { display: flex; gap: .5rem; margin: 1.2rem 0; }
 input { flex: 1; padding: .5rem; border: 1px solid #8884; border-radius: 6px; font: inherit; }
 button { padding: .5rem .9rem; border: 1px solid #8884; border-radius: 6px; background: #8881; font: inherit; cursor: pointer; }
+/* Target size: a 44px minimum keeps these usable on touch and for anyone
+   with imprecise pointing. */
+button { min-height: 44px; }
+button:hover { background: #8883; }
+button:focus-visible { outline: 3px solid CanvasText; outline-offset: 2px; }
+
+.filters { display: flex; gap: .5rem; margin: 1.2rem 0 .8rem; }
+/* The selected filter is marked by aria-pressed, so the styling hangs off the
+   same attribute — visual state and accessible state cannot drift apart. */
+.filters button[aria-pressed="true"] { background: CanvasText; color: Canvas; border-color: CanvasText; }
+
 ul { list-style: none; padding: 0; display: grid; gap: .6rem; }
 li { border: 1px solid #8884; border-radius: 8px; padding: .7rem .9rem; display: flex; gap: 1rem; align-items: flex-start; }
 li .grow { flex: 1; }
 li strong { display: block; }
 li small { opacity: .65; }
+li.is-archived { border-style: dashed; }
+
+/* Text badge, not a colour cue: the archived state has to survive greyscale. */
+.badge {
+  display: inline-block; margin-bottom: .3rem;
+  padding: .1rem .45rem; border: 1px solid CanvasText; border-radius: 999px;
+  font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+}
+
+#empty { opacity: .8; }
+.status { min-height: 1.5rem; margin: .6rem 0 0; font-weight: 600; }

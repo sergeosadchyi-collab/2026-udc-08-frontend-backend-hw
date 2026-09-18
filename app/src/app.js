@@ -21,6 +21,29 @@ function currentUser(req, res, next) {
   next();
 }
 
+/**
+ * The only shape of a note that ever leaves this process.
+ *
+ * `user_id` is deliberately absent: the caller already knows who they are, and
+ * a column used only for authorization has no business in a response. Every
+ * handler selects exactly these columns, so a column added to the table later
+ * cannot leak by default.
+ */
+const NOTE_FIELDS = "id, title, body, archived, created_at";
+
+/** SQLite has no boolean type; normalise 0/1 at the edge, in one place. */
+const toNote = (row) => ({ ...row, archived: Boolean(row.archived) });
+
+const TITLE_MAX = 200;
+const BODY_MAX = 10_000;
+
+/** Whitelisted list filters → the SQL fragment each one appends. */
+const LIST_FILTERS = {
+  active: "AND archived = 0",
+  archived: "AND archived = 1",
+  all: "",
+};
+
 export function createApp(db) {
   const app = express();
   app.use(express.json());
@@ -28,29 +51,31 @@ export function createApp(db) {
 
   app.use("/api", currentUser);
 
-  // List the caller's own notes. `filter` selects the slice the UI shows;
-  // it is whitelisted here rather than interpolated into SQL.
+  // List the caller's own notes. `filter` picks the slice the UI shows; it is
+  // looked up in a whitelist, never interpolated from user input.
   app.get("/api/notes", (req, res) => {
     const filter = req.query.filter ?? "active";
-    const where = { active: "AND archived = 0", archived: "AND archived = 1", all: "" }[filter];
-    if (where === undefined) return res.status(400).json({ error: "unknown filter" });
+    const where = typeof filter === "string" ? LIST_FILTERS[filter] : undefined;
+    if (where === undefined) {
+      return res.status(400).json({ error: "filter must be active, archived or all" });
+    }
 
     const rows = db
       .prepare(
-        `SELECT id, title, body, archived, created_at
+        `SELECT ${NOTE_FIELDS}
            FROM notes
           WHERE user_id = ? ${where}
           ORDER BY id`,
       )
-      .all(req.userId)
-      .map((row) => ({ ...row, archived: Boolean(row.archived) }));
-    res.json(rows);
+      .all(req.userId);
+    res.json(rows.map(toNote));
   });
 
   // Toggle the archived flag on one of the caller's own notes.
   app.patch("/api/notes/:id/archive", (req, res) => {
     // The client is user-controlled, so the value is validated here even
-    // though the UI only ever sends a real boolean.
+    // though the UI only ever sends a real boolean. A string "true" or a 1
+    // is a bug in the caller, not something to coerce and quietly accept.
     const archived = req.body?.archived;
     if (typeof archived !== "boolean") {
       return res.status(400).json({ error: "archived must be a boolean" });
@@ -59,17 +84,15 @@ export function createApp(db) {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(404).json({ error: "not found" });
 
-    // Scoped to the caller: someone else's note is "not found", never a 403
-    // that would confirm it exists.
+    // Scoped to the caller, not just to the id. Someone else's note is
+    // "not found" — a 403 would confirm that the id exists.
     const info = db
       .prepare("UPDATE notes SET archived = ? WHERE id = ? AND user_id = ?")
       .run(archived ? 1 : 0, id, req.userId);
     if (info.changes === 0) return res.status(404).json({ error: "not found" });
 
-    const note = db
-      .prepare("SELECT id, title, body, archived, created_at FROM notes WHERE id = ?")
-      .get(id);
-    res.json({ ...note, archived: Boolean(note.archived) });
+    const note = db.prepare(`SELECT ${NOTE_FIELDS} FROM notes WHERE id = ?`).get(id);
+    res.json(toNote(note));
   });
 
   // Read one note.
@@ -86,14 +109,22 @@ export function createApp(db) {
     const title = typeof req.body?.title === "string" ? req.body.title.trim() : "";
     const body = typeof req.body?.body === "string" ? req.body.body : "";
     if (!title) return res.status(400).json({ error: "title is required" });
+    // Unbounded text is a server problem, not a UI one: `maxlength` in the
+    // form is a hint, and nothing stops a caller from skipping the form.
+    if (title.length > TITLE_MAX) {
+      return res.status(400).json({ error: `title must be at most ${TITLE_MAX} characters` });
+    }
+    if (body.length > BODY_MAX) {
+      return res.status(400).json({ error: `body must be at most ${BODY_MAX} characters` });
+    }
 
     const info = db
       .prepare("INSERT INTO notes (user_id, title, body) VALUES (?, ?, ?)")
       .run(req.userId, title, body);
     const created = db
-      .prepare("SELECT id, title, body, created_at FROM notes WHERE id = ?")
+      .prepare(`SELECT ${NOTE_FIELDS} FROM notes WHERE id = ?`)
       .get(info.lastInsertRowid);
-    res.status(201).json(created);
+    res.status(201).json(toNote(created));
   });
 
   // Delete one of the caller's own notes.
@@ -105,5 +136,15 @@ export function createApp(db) {
     res.status(204).end();
   });
 
+  // An API that answers JSON everywhere else should not answer an HTML error
+  // page when the request body fails to parse.
+  app.use("/api", (err, req, res, next) => {
+    if (err instanceof SyntaxError && "body" in err) {
+      return res.status(400).json({ error: "malformed JSON body" });
+    }
+    next(err);
+  });
+
   return app;
 }
+

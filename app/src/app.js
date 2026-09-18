@@ -11,14 +11,23 @@ const here = dirname(fileURLToPath(import.meta.url));
  *
  * The caller identifies itself with the `x-user-id` header. Seeded users are
  * 1 (Оля) and 2 (Тарас).
+ *
+ * The header is still just a number, but the number now has to name a user
+ * that actually exists. Trusting any positive integer let a caller act as a
+ * user who was never created — which reached the database and came back as a
+ * foreign-key crash instead of an authentication failure.
  */
-function currentUser(req, res, next) {
-  const id = Number(req.header("x-user-id"));
-  if (!Number.isInteger(id) || id <= 0) {
-    return res.status(401).json({ error: "not authenticated" });
-  }
-  req.userId = id;
-  next();
+function makeCurrentUser(db) {
+  const findUser = db.prepare("SELECT id FROM users WHERE id = ?");
+
+  return function currentUser(req, res, next) {
+    const id = Number(req.header("x-user-id"));
+    if (!Number.isInteger(id) || id <= 0 || !findUser.get(id)) {
+      return res.status(401).json({ error: "not authenticated" });
+    }
+    req.userId = id;
+    next();
+  };
 }
 
 /**
@@ -49,7 +58,7 @@ export function createApp(db) {
   app.use(express.json());
   app.use(express.static(resolve(here, "../public")));
 
-  app.use("/api", currentUser);
+  app.use("/api", makeCurrentUser(db));
 
   // List the caller's own notes. `filter` picks the slice the UI shows; it is
   // looked up in a whitelist, never interpolated from user input.
@@ -95,13 +104,24 @@ export function createApp(db) {
     res.json(toNote(note));
   });
 
-  // Read one note.
+  // Read one of the caller's own notes.
+  //
+  // This route used to be `WHERE id = ?` and returned `user_id` with the row,
+  // so any logged-in user could read any note by guessing an id. The boundary
+  // has to come from the session, not from the id in the URL: the question is
+  // not "does this note exist" but "may THIS caller see THIS note".
+  //
+  // The ownership condition belongs in the query itself. Fetching the row and
+  // then comparing `note.user_id !== req.userId` would also work, but then the
+  // data has already left the database before anyone asks about permissions —
+  // one early `return` away from leaking again.
   app.get("/api/notes/:id", (req, res) => {
     const note = db
-      .prepare("SELECT id, user_id, title, body, created_at FROM notes WHERE id = ?")
-      .get(Number(req.params.id));
+      .prepare(`SELECT ${NOTE_FIELDS} FROM notes WHERE id = ? AND user_id = ?`)
+      .get(Number(req.params.id), req.userId);
+    // 404, not 403: a 403 would confirm that the id exists.
     if (!note) return res.status(404).json({ error: "not found" });
-    res.json(note);
+    res.json(toNote(note));
   });
 
   // Create a note for the caller.
@@ -136,13 +156,16 @@ export function createApp(db) {
     res.status(204).end();
   });
 
-  // An API that answers JSON everywhere else should not answer an HTML error
-  // page when the request body fails to parse.
+  // API errors answer JSON, and answer it without a stack trace: Express's
+  // default handler renders absolute file paths and internal frames into the
+  // response body, which is free reconnaissance for an attacker.
+  // eslint-disable-next-line no-unused-vars -- Express needs the 4-arg shape
   app.use("/api", (err, req, res, next) => {
     if (err instanceof SyntaxError && "body" in err) {
       return res.status(400).json({ error: "malformed JSON body" });
     }
-    next(err);
+    console.error(err);
+    res.status(500).json({ error: "internal error" });
   });
 
   return app;
